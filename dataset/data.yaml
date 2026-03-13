@@ -1,0 +1,6 @@
+
+path: C:\YoloProjIntegrador\dataset   # diretório raiz do dataset
+train: train.txt                   # subdiretório das imagens de treino
+val: images\val
+nc: 1
+names: ['pessoa']
