@@ -9,7 +9,7 @@ modelo = YOLO('yolov8n.pt')   # 'n' é o modelo nano (mais leve e rápido)
 
 # 2. Treinar o modelo
 resultados = modelo.train(
-    data='C:/YoloProjIntegrador/dataset/data.yaml',      # arquivo de configuração do dataset
+    data='C:/detectHumans/dataset/data.yaml',      # arquivo de configuração do dataset
     epochs=100,               # número de épocas
     imgsz=640,                # tamanho da imagem de entrada
     batch=8,                  # tamanho do batch (ajuste conforme sua GPU)
