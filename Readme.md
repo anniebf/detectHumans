@@ -75,12 +75,52 @@ pip install ultralytics
 3. Execute o treinamento:
 
 ```bash
-python main.py
+python main.py train
 ```
 Ao final, os pesos treinados serao salvos em:
 
 - `runs/detect/detect_human/ex1/weights/best.pt`
 - `runs/detect/detect_human/ex1/weights/last.pt`
+
+## Testar na Webcam
+
+Para testar o modelo treinado em tempo real na webcam:
+
+```bash
+python main.py webcam
+```
+
+Comando equivalente explicito (apontando para o `best.pt`):
+
+```bash
+python main.py webcam --weights runs/detect/detect_human/ex1/weights/best.pt --source 0
+```
+
+Opcoes uteis:
+
+- ajustar confianca minima:
+
+```bash
+python main.py webcam --conf 0.35
+```
+
+- usar GPU (se disponivel):
+
+```bash
+python main.py webcam --device 0
+```
+
+- salvar o video anotado em `runs/detect/webcam_test/`:
+
+```bash
+python main.py webcam --save
+```
+
+Para validar o modelo manualmente:
+
+```bash
+python main.py val
+```
 ## Proximas Etapas
 
 - aumentar e balancear o dataset;
