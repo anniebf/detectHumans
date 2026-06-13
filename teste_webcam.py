@@ -1,21 +1,104 @@
 import cv2
 import time
+import torch
 from ultralytics import YOLO
 
 # 1. Carregar o seu modelo treinado (ajuste o caminho se a pasta mudar)
 # Quando seu treino terminar, mude para o caminho do 'best.pt'
 model = YOLO(r"C:\DetectHumans\runs\segment\train3\weights\best.pt")
 
-# 2. Iniciar a Webcam (0 é o índice da câmera padrão do notebook)
-cap = cv2.VideoCapture(0)
+CAPTURE_WIDTH = 960
+CAPTURE_HEIGHT = 540
+INFERENCE_IMGSZ = 416
+INFERENCE_CONF = 0.18
+INFERENCE_IOU = 0.35
+INFERENCE_EVERY_N_FRAMES = 2
+MAX_DETECTIONS = 10
+DEVICE = 0 if torch.cuda.is_available() else "cpu"
+USE_HALF = torch.cuda.is_available()
 
-# Configurar resolução para HD (opcional, dependendo da sua webcam)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+def configurar_capture(cap):
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+
+
+def abrir_webcam(indice):
+    cap = cv2.VideoCapture(indice, cv2.CAP_DSHOW)
+    if cap.isOpened():
+        configurar_capture(cap)
+        print(f"Webcam aberta com sucesso no indice {indice}.")
+        return cap
+
+    cap.release()
+    return None
+
+
+def escolher_camera():
+    print("Escolha a camera:")
+    print("  0 - Webcam do notebook/PC")
+    print("  1 - Webcam externa")
+
+    while True:
+        opcao = input("Digite 0 ou 1: ").strip()
+        if opcao in {"0", "1"}:
+            return int(opcao)
+        print("Opcao invalida. Digite 0 ou 1.")
+
+
+# 2. Iniciar a webcam escolhida pelo usuario
+indice_escolhido = escolher_camera()
+cap = abrir_webcam(indice_escolhido)
+
+if cap is None:
+    outro_indice = 1 if indice_escolhido == 0 else 0
+    print(f"Nao foi possivel abrir o indice {indice_escolhido}. Tentando o indice {outro_indice}...")
+    cap = abrir_webcam(outro_indice)
+
+if cap is None:
+    raise RuntimeError(
+        "Nao foi possivel abrir a camera escolhida nem a alternativa. Verifique se a webcam esta conectada e "
+        "se o indice selecionado esta correto."
+    )
+
+try:
+    model.fuse()
+except Exception:
+    pass
 
 prev_time = 0
+frame_index = 0
+ultimo_contador_pessoas = 0
+ultimo_frame_processado = None
 
 print("Aperte 'Q' no teclado para fechar a câmera.")
+
+
+def desenhar_resultado(frame, result):
+    tela = frame.copy()
+
+    if result.boxes is None or len(result.boxes) == 0:
+        return tela, 0
+
+    contador = 0
+    for box in result.boxes:
+        xyxy = box.xyxy[0].cpu().numpy()
+        x1, y1, x2, y2 = [int(valor) for valor in xyxy]
+        contador += 1
+
+        cv2.rectangle(tela, (x1, y1), (x2, y2), (0, 255, 170), 2)
+        cv2.putText(
+            tela,
+            "PESSOA",
+            (x1, max(y1 - 10, 20)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (0, 255, 170),
+            2,
+        )
+
+    return tela, contador
 
 while cap.isOpened():
     success, frame = cap.read()
@@ -26,19 +109,25 @@ while cap.isOpened():
     # Altura e largura originais da captura da câmera
     h, w, _ = frame.shape
 
-    # 3. Rodar o modelo de segmentação no frame atual
-    results = model(frame, stream=True, conf=0.4) # conf=0.4 ignora detecções fracas
+    frame_index += 1
 
-    contador_pessoas = 0
+    # 3. Rodar o modelo em uma cadência menor para manter o FPS mais estável.
+    if frame_index % INFERENCE_EVERY_N_FRAMES == 0 or ultimo_frame_processado is None:
+        result = model.predict(
+            source=frame,
+            imgsz=INFERENCE_IMGSZ,
+            conf=INFERENCE_CONF,
+            iou=INFERENCE_IOU,
+            max_det=MAX_DETECTIONS,
+            verbose=False,
+            device=DEVICE,
+            half=USE_HALF,
+            classes=[0],
+        )[0]
+        ultimo_frame_processado, ultimo_contador_pessoas = desenhar_resultado(frame, result)
 
-    for r in results:
-        # Se houver máscaras/polígonos detectados
-        if r.masks is not None:
-            contador_pessoas = len(r.masks)
-            
-            # Desenha as máscaras coloridas geradas pelo YOLO de forma suave
-            # (O parâmetro alpha controla a transparência da máscara)
-            frame = r.plot(conf=True, line_width=2, font_size=1)
+    contador_pessoas = ultimo_contador_pessoas
+    frame = ultimo_frame_processado if ultimo_frame_processado is not None else frame
 
     # 4. Criando a Interface Bonita (HUD Lateral)
     # Criamos uma barra lateral escura para exibir as estatísticas do sistema

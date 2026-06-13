@@ -1,0 +1,5 @@
+.env
+.venv/
+__pycache__/
+alertas_queda/
+*.pyc
