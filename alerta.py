@@ -175,7 +175,9 @@ def capture_thread_fn(cap_obj):
 
 def inference_thread_fn():
     global annotated_frame, inference_result, running, ultima_chamada_ai, tempo_inicio_queda, alerta_disparado
-    infer_interval = 0.25  # seconds between inference passes (4 Hz)
+    global suspeita_queda_frames, ultimo_sample_ai, status_ai
+    
+    infer_interval = 0.25  # 4 Hz
     while running:
         start = time.time()
         with latest_frame_lock:
@@ -185,7 +187,6 @@ def inference_thread_fn():
             time.sleep(0.01)
             continue
 
-        # run inference on worker_model
         try:
             res = worker_model.predict(
                 source=frm,
@@ -203,101 +204,89 @@ def inference_thread_fn():
             time.sleep(0.1)
             continue
 
-        # process detection result (reuse previous logic)
         tela, queda_detectada_neste_frame, contador_pessoas, melhor_box, postura_melhor, geometria_melhor = desenhar_resultado(frm, res)
 
-        # replicate state updates previously in main loop
-        if melhor_box is not None and postura_melhor == "em_pe":
-            posture_state = "em_pe"
-        elif melhor_box is not None and postura_melhor == "horizontal":
+        if melhor_box is not None and postura_melhor == "horizontal":
             posture_state = "horizontal"
+        elif melhor_box is not None and postura_melhor == "em_pe":
+            posture_state = "em_pe"
         else:
             posture_state = "desconhecida"
 
-        # append historical posture for movement checks
         if geometria_melhor is not None:
             _, _, _, _, _, altura, centro_x, centro_y, proporcao = geometria_melhor
             historico_postura.append((centro_x, centro_y, altura, proporcao))
 
-        # manage suspicion frames
+        # Gerenciamento da suspeita e coleta de frames para a IA externa
         if posture_state == "horizontal":
-            # increment suspicion
-            suspeita = globals().get('suspeita_queda_frames', 0) + 1
-            globals()['suspeita_queda_frames'] = suspeita
-            # sample for AI
+            suspeita_queda_frames += 1
             agora = time.time()
-            if agora - globals().get('ultimo_sample_ai', 0.0) >= AI_SAMPLE_SECONDS:
-                globals()['ultimo_sample_ai'] = agora
-                frame_b64 = preparar_crop_risco(frm, melhor_box) if melhor_box is not None else None
+            if agora - ultimo_sample_ai >= AI_SAMPLE_SECONDS:
+                ultimo_sample_ai = agora
+                frame_b64 = preparar_crop_risco(frm, melhor_box)
                 if frame_b64:
                     frames_suspeita_ai.append(frame_b64)
         else:
-            globals()['suspeita_queda_frames'] = 0
-            frames_suspeita_ai.clear()
+            # Em vez de dar .clear() imediato, vamos reduzindo gradativamente 
+            # para não perder o histórico se o YOLO piscar em um frame
+            if suspeita_queda_frames > 0:
+                suspeita_queda_frames -= 1
+            if len(frames_suspeita_ai) > 0 and suspeita_queda_frames == 0:
+                frames_suspeita_ai.popleft()
 
-        # evaluate local risk similar to previous code
-        suspeita_temporal = globals().get('suspeita_queda_frames', 0) >= SUSPEITA_FRAMES_MIN
-        houve_transicao = len(historico_postura) >= 2
-        houve_movimento_vertical = False
-        if len(historico_postura) >= 2:
-            primeiro = historico_postura[0]
-            ultimo = historico_postura[-1]
-            movimento_y = abs(ultimo[1] - primeiro[1])
-            reducao_altura = primeiro[2] - ultimo[2]
-            houve_movimento_vertical = movimento_y >= MARGEM_MOVIMENTO_PIXELS or reducao_altura >= MARGEM_MOVIMENTO_PIXELS
-
-        risco_local = queda_detectada_neste_frame and suspeita_temporal and houve_movimento_vertical and houve_transicao
+        # Simplificação: se está horizontal e persistiu por alguns frames, aciona o gatilho local
+        risco_local = (posture_state == "horizontal") and (suspeita_queda_frames >= SUSPEITA_FRAMES_MIN)
 
         if risco_local:
-            if globals().get('tempo_inicio_queda', 0) == 0:
-                globals()['tempo_inicio_queda'] = time.time()
+            if tempo_inicio_queda == 0:
+                tempo_inicio_queda = time.time()
             else:
-                tempo_passado = time.time() - globals().get('tempo_inicio_queda', 0)
+                tempo_passado = time.time() - tempo_inicio_queda
+                # Se persistir deitado pelo tempo determinado
                 if tempo_passado > TEMPO_MAX_SUSPEITA:
                     confirmar_ai = not CONFIRMAR_QUEDA_AI
-                    if CONFIRMAR_QUEDA_AI and cliente_openai is not None and len(frames_suspeita_ai) >= AI_GATILHO_FRAMES:
+                    
+                    if CONFIRMAR_QUEDA_AI and cliente_openai is not None and len(frames_suspeita_ai) >= 1:
                         if time.time() - ultima_chamada_ai >= TEMPO_COOLDOWN_AI:
-                            globals()['ultima_chamada_ai'] = time.time()
-                            contexto_texto = (
-                                f"postura={postura_anterior}; frames_suspeita={len(frames_suspeita_ai)}; "
-                                f"movimento_vertical={houve_movimento_vertical}; transicao={houve_transicao}; "
-                                f"suspeita_frames={globals().get('suspeita_queda_frames',0)}"
-                            )
+                            ultima_chamada_ai = time.time()
+                            
+                            contexto_texto = f"postura=horizontal; frames_coletados={len(frames_suspeita_ai)}"
+                            
+                            # Chamada para validar se a pessoa está caída no chão
                             resultado_ai, erro_ai = confirmar_risco_com_openai(list(frames_suspeita_ai), contexto_texto)
+                            
                             if resultado_ai is not None:
                                 risco_ai = int(resultado_ai.get('risco', 0))
                                 categoria_ai = resultado_ai.get('categoria', '')
-                                if resultado_ai.get('queda', False) and risco_ai >= AI_RISCO_ALTO:
-                                    globals()['alerta_disparado'] = True
-                                    globals()['status_ai'] = f'IA confirmou risco ({risco_ai}%) {categoria_ai}'
-                                    confirmar_ai = False
+                                
+                                if resultado_ai.get('queda', False) or categoria_ai in ['queda', 'risco_alto']:
+                                    alerta_disparado = True
+                                    status_ai = f'Confirmado chão ({risco_ai}%)'
                                 else:
-                                    globals()['status_ai'] = f'IA descartou ({risco_ai}%) {categoria_ai}'
-                                    confirmar_ai = False
-                                    globals()['tempo_inicio_queda'] = 0
-                                    globals()['suspeita_queda_frames'] = 0
+                                    status_ai = f'Descartado ({risco_ai}%) {categoria_ai}'
+                                    tempo_inicio_queda = 0
+                                    suspeita_queda_frames = 0
                                     frames_suspeita_ai.clear()
-                                    historico_postura.clear()
-                                    globals()['alerta_disparado'] = False
+                                    alerta_disparado = False
                             else:
-                                globals()['status_ai'] = erro_ai or 'IA indisponivel'
-                    if confirmar_ai:
-                        globals()['alerta_disparado'] = True
+                                status_ai = erro_ai or 'IA indisponivel'
+                    else:
+                        if not CONFIRMAR_QUEDA_AI:
+                            alerta_disparado = True
+        else:
+            # Se a pessoa levantou e sumiu o risco local por muito tempo, reseta o alarme
+            if tempo_inicio_queda != 0 and (time.time() - tempo_inicio_queda > 5.0):
+                tempo_inicio_queda = 0
+                alerta_disparado = False
 
-        # update annotated frame
         with annotated_frame_lock:
             annotated_frame = tela
 
-        # publish contador_pessoas for main HUD
         globals()['contador_pessoas'] = contador_pessoas
 
-        # small sleep to respect target infer rate
         elapsed = time.time() - start
         to_sleep = max(0.0, infer_interval - elapsed)
         time.sleep(to_sleep)
-
-    print("Inference thread ending")
-
 
 def expandir_bbox(x1, y1, x2, y2, largura_frame, altura_frame, margem=MARGEM_CROP):
     largura = x2 - x1
@@ -390,13 +379,13 @@ def confirmar_risco_com_openai(frames_base64, contexto_texto):
         return None, "OpenAI nao configurada"
 
     prompt = (
-        "Analise uma pequena sequência de imagens de uma câmera de monitoramento. Responda apenas em JSON com as chaves "
+        "Analise a imagem da camera de seguranca. Foque em identificar se o ser humano detectado "
+        "esta deitado no chao, caído, desmaiado ou em uma situacao de vulnerabilidade (como chao de banheiro/sala). "
+        "Responda APENAS em JSON valido com as chaves: "
         '"risco" (0 a 100), "queda" (boolean), "motivo" (string) e "categoria" (string). '
-        "Use categoria como um destes valores: 'normal', 'agachado', 'inclinando', 'sentado', 'risco_baixo', 'risco_alto', 'queda'. "
-        "Marque queda=true somente se houver uma transição clara de postura ou uma pessoa no chão. "
-        "Se a pessoa estiver sentada, parada, abaixando a cabeça, inclinada para pegar algo ou agachada sem sinais de tombamento, não marque queda. "
-        f"Contexto local: {contexto_texto}. "
-        "Se houver dúvida, prefira risco baixo ou normal."
+        "Se a pessoa estiver deitada no chao ou caída, marque 'queda': true e risco acima de 80. "
+        "Se ela estiver apenas sentada em uma cadeira, em pe ou agachada normalmente trabalhando, marque 'queda': false. "
+        f"Contexto: {contexto_texto}."
     )
 
     imagens = []
