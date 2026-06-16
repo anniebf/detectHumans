@@ -50,7 +50,7 @@ Estrutura dos dados:
 dataset2/
 ├── data.yaml              # Configuração do dataset
 ├── images/
-│   └── train/            # 741 imagens de treino
+│   └── train/            # 926 imagens de treino
 └── labels/
     └── train/            # 741 máscaras de segmentação (.txt)
 ```
