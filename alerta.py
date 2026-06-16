@@ -11,7 +11,15 @@ import threading
 from typing import Optional
 import numpy as np
 
+# Importações da nova Interface Gráfica
+import customtkinter as ctk
+from PIL import Image, ImageTk
+
 load_dotenv()
+
+# Configuração visual do CustomTkinter
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("blue")
 
 # 1. Configurações Iniciais e Pastas de Alerta
 ALERTA_DIR = "alertas_queda"
@@ -82,23 +90,34 @@ def abrir_webcam(indice):
     return None
 
 
-def escolher_camera():
-    print("Escolha a camera:")
-    print("  0 - Webcam do notebook/PC")
-    print("  1 - Webcam externa")
-    while True:
-        opcao = input("Digite 0 ou 1: ").strip()
-        if opcao in {"0", "1"}:
-            return int(opcao)
-        print("Opcao invalida. Digite 0 ou 1.")
+# --- Seletor de Câmera Gráfico Moderno ---
+def escolher_camera_gui():
+    escolha = {"index": 0}
+    dialog = ctk.CTk()
+    dialog.title("Selecionar Câmera")
+    dialog.geometry("320x180")
+    dialog.resizable(False, False)
+    
+    label = ctk.CTkLabel(dialog, text="Escolha a câmera de monitoramento:", font=("Arial", 14, "bold"))
+    label.pack(pady=15)
+    
+    def btn_click(idx):
+        escolha["index"] = idx
+        dialog.destroy()
+        
+    btn_0 = ctk.CTkButton(dialog, text="0 - Webcam Integrada", command=lambda: btn_click(0))
+    btn_0.pack(pady=5)
+    btn_1 = ctk.CTkButton(dialog, text="1 - Webcam Externa", command=lambda: btn_click(1))
+    btn_1.pack(pady=5)
+    
+    dialog.mainloop()
+    return escolha["index"]
 
-
-indice_escolhido = escolher_camera()
+indice_escolhido = escolher_camera_gui()
 cap = abrir_webcam(indice_escolhido)
 
 if cap is None:
     outro_indice = 1 if indice_escolhido == 0 else 0
-    print(f"Nao foi possivel abrir o indice {indice_escolhido}. Tentando o indice {outro_indice}...")
     cap = abrir_webcam(outro_indice)
 
 if cap is None:
@@ -118,11 +137,8 @@ ultima_chamada_ai = 0.0
 status_ai = "IA aguardando detecção"
 frames_suspeita_ai = deque(maxlen=AI_JANELA_FRAMES)
 ultimo_sample_ai = 0.0
-
-# Flag de controle para evitar chamadas duplicadas concorrentes à API
 ai_buscando = False 
 
-# Gerenciamento de Memória entre Threads
 latest_frame = None
 annotated_frame = None
 running = True
@@ -131,7 +147,6 @@ frame_lock = threading.Lock()
 
 
 def capture_thread_fn(cap_obj):
-    """Limpa o buffer de hardware da câmera para eliminar travamentos e engasgos"""
     global latest_frame, running
     while running and cap_obj.isOpened():
         cap_obj.grab() 
@@ -145,9 +160,7 @@ def capture_thread_fn(cap_obj):
 
 
 def async_openai_worker(frames_para_enviar):
-    """Executa a chamada HTTP pesada em background sem congelar o loop de vídeo"""
     global status_ai, alerta_disparado, ai_buscando
-    
     resultado_ai, erro_ai = confirmar_risco_com_openai(frames_para_enviar)
     
     if resultado_ai is not None:
@@ -162,7 +175,6 @@ def async_openai_worker(frames_para_enviar):
             status_ai = f'Ignorado ({risco_ai}%) - Seguro'
             alerta_disparado = False
     else:
-        # Fallback local se a API falhar (Garante a segurança)
         alerta_disparado = True
         status_ai = f"Alerta Local (IA Offline/Erro)"
         
@@ -170,7 +182,6 @@ def async_openai_worker(frames_para_enviar):
 
 
 def inference_thread_fn():
-    """Analisa os frames, calcula posturas e aciona emergência de forma imediata"""
     global annotated_frame, running, ultima_chamada_ai, tempo_inicio_queda, alerta_disparado
     global suspeita_queda_frames, ultimo_sample_ai, status_ai, contador_pessoas, ai_buscando
     
@@ -217,7 +228,6 @@ def inference_thread_fn():
         else:
             posture_state = "sem_alvo"
 
-        # SISTEMA DE DISPARO DE ALERTA
         if posture_state == "risco_chao":
             suspeita_queda_frames += 1
             
@@ -241,7 +251,6 @@ def inference_thread_fn():
 
             if CONFIRMAR_QUEDA_AI and cliente_openai is not None:
                 agora = time.time()
-                # Só dispara a Thread em background se respeitar o cooldown e não houver outra ativa
                 if (agora - ultima_chamada_ai >= TEMPO_COOLDOWN_AI) and not ai_buscando:
                     ultima_chamada_ai = agora
                     ai_buscando = True
@@ -252,7 +261,6 @@ def inference_thread_fn():
                         if frame_b64:
                             frames_suspeita_ai.append(frame_b64)
                     
-                    # Cria e dispara a thread isolada (A mágica da otimização está aqui)
                     dados_envio = list(frames_suspeita_ai)
                     threading.Thread(target=async_openai_worker, args=(dados_envio,), daemon=True).start()
             else:
@@ -319,7 +327,7 @@ def confirmar_risco_com_openai(frames_base64):
         "independente se parece que está brincando, descansando, engatinhando ou dormindo. "
         "Estar posicionado no nível do chão ou tapete do quarto configura situação de risco alto para este sistema.\n"
         "Retorne estritamente um objeto JSON com as chaves:\n"
-        '{"risco": int(0-100), "queda": bool, "motivo": "string descritiva curta", "categoria": "queda"/"risco_alto"/"seguro"}'
+        '{"risco": int(0-100), "queda": bool, "motivo": "string descritiva corta", "categoria": "queda"/"risco_alto"/"seguro"}'
     )
 
     imagens = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}} for f in frames_base64]
@@ -383,62 +391,132 @@ def drawing_engine(frame, result):
 threading.Thread(target=capture_thread_fn, args=(cap,), daemon=True).start()
 threading.Thread(target=inference_thread_fn, daemon=True).start()
 
-print("Serviço ativo. Renderizando painel...")
+# --- CONSTRUÇÃO DA INTERFACE GRÁFICA MODERNA (CustomTkinter) ---
+root = ctk.CTk()
+root.title("Guardião IA - Visão Computacional")
+root.geometry("1024x600")
+root.minsize(800, 480)
 
-FPS_DESEJADO = 30
-tempo_por_frame = 1.0 / FPS_DESEJADO
+# Estrutura de Layout em Grid Responsivo
+root.grid_columnconfigure(0, weight=1)  # Painel de Vídeo expande
+root.grid_columnconfigure(1, weight=0)  # HUD fixo na direita
+root.grid_rowconfigure(0, weight=1)
 
-# LOOP PRINCIPAL: Sem concorrência, focado apenas na interface fluida
-while running:
-    start_loop = time.time()
+# Frame da Esquerda (Vídeo)
+video_container = ctk.CTkFrame(root, corner_radius=0, fg_color="#0a0a0a")
+video_container.grid(row=0, column=0, sticky="nsew")
+
+video_label = ctk.CTkLabel(video_container, text="")
+video_label.pack(fill="both", expand=True, padx=10, pady=10)
+
+# Frame da Direita (HUD Painel de Controle)
+hud_panel = ctk.CTkFrame(root, width=300, corner_radius=0, fg_color="#18181b")
+hud_panel.grid(row=0, column=1, sticky="nsew")
+hud_panel.grid_propagate(False)
+
+# Elementos Textuais do HUD Gráfico
+lbl_titulo = ctk.CTkLabel(hud_panel, text="SISTEMA GUARDIÃO IA", font=("Arial", 16, "bold"), text_color="#f4f4f5")
+lbl_titulo.pack(pady=(30, 5), padx=20, anchor="w")
+
+sub_linha = ctk.CTkFrame(hud_panel, height=2, fg_color="#3f3f46")
+sub_linha.pack(fill="x", padx=20, pady=(0, 25))
+
+# Card de Status Dinâmico
+status_card = ctk.CTkFrame(hud_panel, height=60, corner_radius=8, fg_color="#27272a")
+status_card.pack(fill="x", padx=20, pady=10)
+lbl_status = ctk.CTkLabel(status_card, text="SISTEMA NORMAL", font=("Arial", 14, "bold"), text_color="#10b981")
+lbl_status.pack(expand=True)
+
+# Informações Auxiliares
+lbl_pessoas = ctk.CTkLabel(hud_panel, text="Pessoas em cena: 0", font=("Arial", 13), text_color="#a1a1aa")
+lbl_pessoas.pack(pady=8, padx=20, anchor="w")
+
+lbl_hardware = ctk.CTkLabel(hud_panel, text=f"Hardware: {DEVICE} (0 FPS)", font=("Arial", 13), text_color="#a1a1aa")
+lbl_hardware.pack(pady=8, padx=20, anchor="w")
+
+lbl_ia = ctk.CTkLabel(hud_panel, text=f"IA: {status_ai}", font=("Arial", 12), text_color="#71717a", wraplength=260, justify="left")
+lbl_ia.pack(pady=15, padx=20, anchor="w")
+
+# Alerta de Emergência Visual Redesenhado
+alert_box = ctk.CTkFrame(hud_panel, height=70, corner_radius=8, fg_color="#7f1d1d")
+lbl_alert_text = ctk.CTkLabel(alert_box, text="🚨 ALERTA ENVIADO", font=("Arial", 14, "bold"), text_color="#fca5a5")
+lbl_alert_text.pack(expand=True)
+
+def fechar_aplicativo():
+    global running
+    running = False
+    cap.release()
+    root.quit()
+
+btn_sair = ctk.CTkButton(hud_panel, text="Encerrar Monitor", fg_color="#3f3f46", hover_color="#52525b", command=fechar_aplicativo)
+btn_sair.pack(side="bottom", pady=20, padx=20, fill="x")
+
+# --- LOOP DE ATUALIZAÇÃO DA INTERFACE (Substitui o while antigo) ---
+def update_gui_loop():
+    global prev_time, annotated_frame, latest_frame, running, alerta_disparado, contador_pessoas, status_ai
+    
+    if not running:
+        return
 
     with frame_lock:
         if annotated_frame is not None:
-            display_final = annotated_frame.copy()
+            frame_cv = annotated_frame.copy()
         else:
-            display_final = latest_frame.copy() if latest_frame is not None else None
+            frame_cv = latest_frame.copy() if latest_frame is not None else None
 
-    if display_final is None:
-        display_final = np.zeros((CAPTURE_HEIGHT, CAPTURE_WIDTH, 3), dtype=np.uint8)
+    if frame_cv is not None:
+        # Medição de FPS
+        current_time = time.time()
+        fps = int(1 / (current_time - prev_time)) if (current_time - prev_time) > 0 else 0
+        prev_time = current_time
 
-    h, w, _ = display_final.shape
-    cor_hud_principal = (0, 0, 255) if alerta_disparado else (0, 255, 170)
+        # Obter o tamanho atual do container para redimensionamento perfeito inteligente
+        win_w = max(video_label.winfo_width(), 10)
+        win_h = max(video_label.winfo_height(), 10)
 
-    hud_width = 320
-    interface = cv2.copyMakeBorder(display_final, 0, 0, 0, hud_width, cv2.BORDER_CONSTANT, value=(15, 15, 15))
-    start_x = w
+        # Trata o aspecto mantendo a proporção correta
+        img_h, img_w, _ = frame_cv.shape
+        proporcao_original = img_w / img_h
+        proporcao_janela = win_w / win_h
 
-    current_time = time.time()
-    fps = int(1 / (current_time - prev_time)) if (current_time - prev_time) > 0 else 0
-    prev_time = current_time
+        if proporcao_janela > proporcao_original:
+            novo_h = win_h
+            novo_w = int(win_h * proporcao_original)
+        else:
+            novo_w = win_w
+            novo_h = int(win_w / proporcao_original)
 
-    # Elementos do HUD Lateral
-    cv2.line(interface, (start_x, 0), (start_x, h), cor_hud_principal, 2)
-    cv2.putText(interface, "MONITOR DE SEGURANCA", (start_x + 20, 40), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
-    cv2.line(interface, (start_x + 20, 55), (start_x + 250, 55), (60, 60, 60), 1)
-    
-    status_texto = "EMERGENCIA / QUEDA" if alerta_disparado else "SISTEMA NORMAL"
-    cv2.putText(interface, f"STATUS: {status_texto}", (start_x + 20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cor_hud_principal, 1)
-    cv2.putText(interface, f"PESSOAS EM CENA: {contador_pessoas}", (start_x + 20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    cv2.putText(interface, f"HARDWARE: {DEVICE} ({fps} FPS)", (start_x + 20, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
-    cv2.putText(interface, f"IA: {status_ai}", (start_x + 20, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+        # Redimensionamento suave livre de aliasing de câmeras antigas
+        frame_resized = cv2.resize(frame_cv, (novo_w, novo_h), interpolation=cv2.INTER_LINEAR)
+        
+        # Converte BGR para RGB e joga no Tkinter
+        frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+        img_pil = Image.fromarray(frame_rgb)
+        img_tk = ImageTk.PhotoImage(image=img_pil)
 
-    if alerta_disparado:
-        cv2.rectangle(interface, (start_x + 15, 240), (start_x + 300, 295), (0, 0, 180), -1)
-        cv2.putText(interface, f"ALERTA ENVIADO", (start_x + 45, 275), cv2.FONT_HERSHEY_DUPLEX, 0.55, (255, 255, 255), 1)
+        video_label.configure(image=img_tk)
+        video_label.image = img_tk
 
-    cv2.putText(interface, "Aperte 'Q' para fechar", (start_x + 20, h - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (90, 90, 90), 1)
-    
-    cv2.imshow("Guardiao IA - Visao Computacional", interface)
+        # Atualizações do Painel HUD Lateral Gráfico
+        lbl_pessoas.configure(text=f"Pessoas em cena: {contador_pessoas}")
+        lbl_hardware.configure(text=f"Hardware: {DEVICE} ({fps} FPS)")
+        lbl_ia.configure(text=f"IA: {status_ai}")
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        running = False
-        break
+        if alerta_disparado:
+            status_card.configure(fg_color="#450a0a")
+            lbl_status.configure(text="EMERGÊNCIA / QUEDA", text_color="#ef4444")
+            if not alert_box.winfo_manager():
+                alert_box.pack(fill="x", padx=20, pady=10, before=btn_sair)
+        else:
+            status_card.configure(fg_color="#14532d")
+            lbl_status.configure(text="SISTEMA NORMAL", text_color="#4ade80")
+            if alert_box.winfo_manager():
+                alert_box.pack_forget()
 
-    tempo_gasto = time.time() - start_loop
-    tempo_restante = tempo_por_frame - tempo_gasto
-    if tempo_restante > 0:
-        time.sleep(tempo_restante)
+    # Agenda a próxima execução do frame (~30 FPS)
+    root.after(30, update_gui_loop)
 
-cap.release()
-cv2.destroyAllWindows()
+# Dispara o loop interno do Tkinter
+root.after(100, update_gui_loop)
+root.protocol("WM_DELETE_WINDOW", fechar_aplicativo)
+root.mainloop()
