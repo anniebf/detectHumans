@@ -24,12 +24,10 @@ model = YOLO(r"C:\DetectHumans\runs\segment\train3\weights\best.pt")
 CAPTURE_WIDTH = 640
 CAPTURE_HEIGHT = 360
 INFERENCE_IMGSZ = 320
-INFERENCE_CONF = 0.2
-INFERENCE_IOU = 0.35
-MAX_DETECTIONS = 10
-# Avoid importing torch at module import time on Windows (can hang due to platform checks).
-# Default to CPU. To enable GPU, set environment variable DEVICE to the GPU index (e.g. 0)
-# and set USE_HALF=1 in the environment if you know your GPU supports FP16.
+INFERENCE_CONF = 0.15       # Reduzido de 0.2 para 0.15 para garantir que veja a pessoa no chão
+INFERENCE_IOU = 0.40        # Melhorado o descarte de caixas sobrepostas
+MAX_DETECTIONS = 5          # Reduzido de 10 para 5 para economizar CPU
+
 device_env = os.getenv("DEVICE")
 if device_env is None:
     DEVICE = "cpu"
@@ -40,18 +38,19 @@ USE_HALF = os.getenv("USE_HALF", "0") == "1"
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 USAR_OPENAI = os.getenv("OPENAI_CONFIRMAR_QUEDA", "1") == "1"
 CONFIRMAR_QUEDA_AI = USAR_OPENAI and bool(os.getenv("OPENAI_API_KEY"))
-SUSPEITA_FRAMES_MIN = 3
-LIMIAR_QUEDA_HORZ = 0.95
-LIMIAR_EM_PE = 1.55
-LIMIAR_TRANSICAO = 1.15
-TEMPO_MAX_SUSPEITA = 2.2
-TEMPO_COOLDOWN_AI = 2.5
-MARGEM_CROP = 0.18
-AI_SAMPLE_SECONDS = 0.7
+
+# LIMIARES ADAPTADOS PARA CÂMERA ALTA EM DIAGONAIS
+SUSPEITA_FRAMES_MIN = 2     # Reage mais rápido
+LIMIAR_QUEDA_HORZ = 1.15    # Ajustado de 0.95 para 1.15 para pegar corpos deitados em perspectiva
+LIMIAR_EM_PE = 1.45
+LIMIAR_TRANSICAO = 1.20
+
+TEMPO_MAX_SUSPEITA = 1.5    # Menor tempo esperando antes de chamar a IA
+TEMPO_COOLDOWN_AI = 3.0
+MARGEM_CROP = 0.15
+AI_SAMPLE_SECONDS = 0.5
 AI_JANELA_FRAMES = 3
-AI_GATILHO_FRAMES = 2
-AI_RISCO_ALTO = 70
-MARGEM_MOVIMENTO_PIXELS = 18
+contador_pessoas = 0
 
 cliente_openai = None
 if CONFIRMAR_QUEDA_AI:
@@ -61,7 +60,7 @@ if CONFIRMAR_QUEDA_AI:
         cliente_openai = None
 
 
-def configurar_capture(cap):
+def configuring_capture(cap):
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAPTURE_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAPTURE_HEIGHT)
@@ -69,7 +68,6 @@ def configurar_capture(cap):
 
 
 def abrir_webcam(indice):
-    # Tenta abrir o indice preferido primeiro; se falhar, tenta outros indices comuns.
     tried = []
     indices_to_try = [indice] + [i for i in range(0, 8) if i != indice]
 
@@ -77,7 +75,7 @@ def abrir_webcam(indice):
         tried.append(idx)
         cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
         if cap.isOpened():
-            configurar_capture(cap)
+            configuring_capture(cap)
             print(f"Webcam aberta com sucesso no indice {idx} (tentativas: {tried}).")
             return cap
         else:
@@ -85,8 +83,6 @@ def abrir_webcam(indice):
                 cap.release()
             except Exception:
                 pass
-
-    print(f"Falha ao abrir a webcam. Indices tentados: {tried}")
     return None
 
 
@@ -94,7 +90,6 @@ def escolher_camera():
     print("Escolha a camera:")
     print("  0 - Webcam do notebook/PC")
     print("  1 - Webcam externa")
-
     while True:
         opcao = input("Digite 0 ou 1: ").strip()
         if opcao in {"0", "1"}:
@@ -111,80 +106,65 @@ if cap is None:
     cap = abrir_webcam(outro_indice)
 
 if cap is None:
-    raise RuntimeError(
-        "Nao foi possivel abrir a camera escolhida nem a alternativa. Verifique se a webcam esta conectada e "
-        "se o indice selecionado esta correto."
-    )
+    raise RuntimeError("Nao foi possivel abrir nenhuma camera.")
 
 try:
     model.fuse()
 except Exception:
     pass
 
-# Variáveis para controle do tempo de queda (evitar alarmes falsos)
+# Variáveis globais de controle
 tempo_inicio_queda = 0
 alerta_disparado = False
-tempo_cooldown_print = 0 # Evita tirar 30 prints por segundo durante a queda
-prev_time = 0
-frames_sem_pessoa = 0
+prev_time = time.time()
 suspeita_queda_frames = 0
-postura_anterior = "desconhecida"
 ultima_chamada_ai = 0.0
-status_ai = "IA desativada"
+status_ai = "IA aguardando"
 frames_suspeita_ai = deque(maxlen=AI_JANELA_FRAMES)
 ultimo_sample_ai = 0.0
-historico_postura = deque(maxlen=AI_JANELA_FRAMES)
 
-print("Sistema de Monitoramento Iniciado. Pressione 'Q' para sair.")
-
-# Threading globals
+# Linha de montagem de Threads sem gargalo de Lock
 latest_frame = None
-latest_frame_lock = threading.Lock()
 annotated_frame = None
-annotated_frame_lock = threading.Lock()
-inference_result = None
-inference_lock = threading.Lock()
 running = True
 
-
-def load_preferred_model():
-    """Load detection weights if provided via env var DETECTION_WEIGHTS, else use default model."""
-    weights = os.getenv("DETECTION_WEIGHTS")
-    if weights and os.path.exists(weights):
-        print(f"Carregando pesos de deteccao: {weights}")
-        return YOLO(str(weights))
-    # fallback to existing model already loaded
-    return model
-
-
-worker_model: Optional[YOLO] = None
-worker_model = load_preferred_model()
+frame_lock = threading.Lock()
 
 
 def capture_thread_fn(cap_obj):
+    """Thread otimizada: Limpa o buffer da câmera agressivamente para impedir travamentos"""
     global latest_frame, running
     while running and cap_obj.isOpened():
-        ok, frm = cap_obj.read()
+        # Esvazia buffers antigos remanescentes na fila da webcam
+        cap_obj.grab() 
+        ok, frm = cap_obj.retrieve()
         if not ok:
             time.sleep(0.01)
             continue
-        with latest_frame_lock:
-            latest_frame = frm.copy()
-    print("Capture thread ending")
+        
+        with frame_lock:
+            latest_frame = frm
 
 
 def inference_thread_fn():
-    global annotated_frame, inference_result, running, ultima_chamada_ai, tempo_inicio_queda, alerta_disparado
-    global suspeita_queda_frames, ultimo_sample_ai, status_ai
+    """Thread assíncrona: Executa a inferência YOLO de maneira cadenciada sem congelar a UI"""
+    global annotated_frame, running, ultima_chamada_ai, tempo_inicio_queda, alerta_disparado
+    global suspeita_queda_frames, ultimo_sample_ai, status_ai, contador_pessoas
     
-    infer_interval = 0.25  # 4 Hz
+    worker_model = model
+    infer_interval = 0.15  # ~7 Hz para manter precisão sem explodir CPU
+    
     while running:
         start = time.time()
-        with latest_frame_lock:
-            frm = None if latest_frame is None else latest_frame.copy()
+        
+        with frame_lock:
+            if latest_frame is None:
+                frm = None
+            else:
+                frm = latest_frame  # Referência direta sem o gargalo do .copy()
 
         if frm is None:
-            time.sleep(0.01)
+            time.sleep(0.02)
             continue
 
         try:
@@ -204,20 +184,17 @@ def inference_thread_fn():
             time.sleep(0.1)
             continue
 
-        tela, queda_detectada_neste_frame, contador_pessoas, melhor_box, postura_melhor, geometria_melhor = desenhar_resultado(frm, res)
+        tela, queda_detectada_neste_frame, cp_count, melhor_box, postura_melhor = drawing_engine(frm, res)
+        contador_pessoas = cp_count
 
-        if melhor_box is not None and postura_melhor == "horizontal":
-            posture_state = "horizontal"
-        elif melhor_box is not None and postura_melhor == "em_pe":
-            posture_state = "em_pe"
-        else:
-            posture_state = "desconhecida"
+        posture_state = "desconhecida"
+        if melhor_box is not None:
+            if postura_melhor in ["horizontal", "transicao"]:
+                posture_state = "horizontal"
+            else:
+                posture_state = "em_pe"
 
-        if geometria_melhor is not None:
-            _, _, _, _, _, altura, centro_x, centro_y, proporcao = geometria_melhor
-            historico_postura.append((centro_x, centro_y, altura, proporcao))
-
-        # Gerenciamento da suspeita e coleta de frames para a IA externa
+        # Lógica de captura de amostras para envio à IA externa
         if posture_state == "horizontal":
             suspeita_queda_frames += 1
             agora = time.time()
@@ -227,14 +204,12 @@ def inference_thread_fn():
                 if frame_b64:
                     frames_suspeita_ai.append(frame_b64)
         else:
-            # Em vez de dar .clear() imediato, vamos reduzindo gradativamente 
-            # para não perder o histórico se o YOLO piscar em um frame
             if suspeita_queda_frames > 0:
                 suspeita_queda_frames -= 1
             if len(frames_suspeita_ai) > 0 and suspeita_queda_frames == 0:
                 frames_suspeita_ai.popleft()
 
-        # Simplificação: se está horizontal e persistiu por alguns frames, aciona o gatilho local
+        # Condição de perigo iminente validada localmente
         risco_local = (posture_state == "horizontal") and (suspeita_queda_frames >= SUSPEITA_FRAMES_MIN)
 
         if risco_local:
@@ -242,86 +217,75 @@ def inference_thread_fn():
                 tempo_inicio_queda = time.time()
             else:
                 tempo_passado = time.time() - tempo_inicio_queda
-                # Se persistir deitado pelo tempo determinado
                 if tempo_passado > TEMPO_MAX_SUSPEITA:
-                    confirmar_ai = not CONFIRMAR_QUEDA_AI
-                    
                     if CONFIRMAR_QUEDA_AI and cliente_openai is not None and len(frames_suspeita_ai) >= 1:
                         if time.time() - ultima_chamada_ai >= TEMPO_COOLDOWN_AI:
                             ultima_chamada_ai = time.time()
                             
-                            contexto_texto = f"postura=horizontal; frames_coletados={len(frames_suspeita_ai)}"
-                            
-                            # Chamada para validar se a pessoa está caída no chão
-                            resultado_ai, erro_ai = confirmar_risco_com_openai(list(frames_suspeita_ai), contexto_texto)
+                            status_ai = "Analisando com GPT..."
+                            resultado_ai, erro_ai = confirmar_risco_com_openai(list(frames_suspeita_ai))
                             
                             if resultado_ai is not None:
                                 risco_ai = int(resultado_ai.get('risco', 0))
                                 categoria_ai = resultado_ai.get('categoria', '')
+                                is_queda = resultado_ai.get('queda', False)
                                 
-                                if resultado_ai.get('queda', False) or categoria_ai in ['queda', 'risco_alto']:
+                                # Critério de emergência inteligente baseado no seu ambiente
+                                if is_queda or risco_ai >= 45 or categoria_ai in ['queda', 'risco_alto']:
                                     alerta_disparado = True
-                                    status_ai = f'Confirmado chão ({risco_ai}%)'
+                                    status_ai = f'PERIGO: CHÃO DETECTADO ({risco_ai}%)'
                                 else:
-                                    status_ai = f'Descartado ({risco_ai}%) {categoria_ai}'
+                                    status_ai = f'Descartado ({risco_ai}%) - {resultado_ai.get("motivo", "")[:15]}'
                                     tempo_inicio_queda = 0
                                     suspeita_queda_frames = 0
                                     frames_suspeita_ai.clear()
                                     alerta_disparado = False
                             else:
-                                status_ai = erro_ai or 'IA indisponivel'
+                                status_ai = erro_ai or 'IA Offline'
                     else:
                         if not CONFIRMAR_QUEDA_AI:
                             alerta_disparado = True
         else:
-            # Se a pessoa levantou e sumiu o risco local por muito tempo, reseta o alarme
-            if tempo_inicio_queda != 0 and (time.time() - tempo_inicio_queda > 5.0):
+            if posture_state == "em_pe":
                 tempo_inicio_queda = 0
                 alerta_disparado = False
 
-        with annotated_frame_lock:
+        with frame_lock:
             annotated_frame = tela
-
-        globals()['contador_pessoas'] = contador_pessoas
 
         elapsed = time.time() - start
         to_sleep = max(0.0, infer_interval - elapsed)
         time.sleep(to_sleep)
+
 
 def expandir_bbox(x1, y1, x2, y2, largura_frame, altura_frame, margem=MARGEM_CROP):
     largura = x2 - x1
     altura = y2 - y1
     margem_x = int(largura * margem)
     margem_y = int(altura * margem)
-
-    novo_x1 = max(0, x1 - margem_x)
-    novo_y1 = max(0, y1 - margem_y)
-    novo_x2 = min(largura_frame, x2 + margem_x)
-    novo_y2 = min(altura_frame, y2 + margem_y)
-    return novo_x1, novo_y1, novo_x2, novo_y2
+    return max(0, x1 - margem_x), max(0, y1 - margem_y), min(largura_frame, x2 + margem_x), min(altura_frame, y2 + margem_y)
 
 
 def preparar_crop_risco(frame, box):
-    xyxy = box.xyxy[0].cpu().numpy()
-    bx1, by1, bx2, by2 = int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])
-    h_frame, w_frame = frame.shape[:2]
-    cx1, cy1, cx2, cy2 = expandir_bbox(bx1, by1, bx2, by2, w_frame, h_frame)
-    crop = frame[cy1:cy2, cx1:cx2]
+    try:
+        xyxy = box.xyxy[0].cpu().numpy()
+        bx1, by1, bx2, by2 = int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])
+        h_frame, w_frame = frame.shape[:2]
+        cx1, cy1, cx2, cy2 = expandir_bbox(bx1, by1, bx2, by2, w_frame, h_frame)
+        crop = frame[cy1:cy2, cx1:cx2]
 
-    if crop.size == 0:
+        if crop.size == 0:
+            return None
+
+        if crop.shape[1] > 400:
+            crop = cv2.resize(crop, (400, int(crop.shape[0] * (400 / crop.shape[1]))), interpolation=cv2.INTER_AREA)
+
+        sucesso, buffer = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+        if not sucesso:
+            return None
+        return base64.b64encode(buffer).decode("utf-8")
+    except Exception:
         return None
-
-    altura_crop, largura_crop = crop.shape[:2]
-    max_largura = 512
-    if largura_crop > max_largura:
-        nova_altura = max(1, int(altura_crop * (max_largura / largura_crop)))
-        crop = cv2.resize(crop, (max_largura, nova_altura), interpolation=cv2.INTER_AREA)
-
-    sucesso, buffer = cv2.imencode(".jpg", crop, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-    if not sucesso:
-        return None
-
-    return base64.b64encode(buffer).decode("utf-8")
 
 
 def classificar_postura_box(box):
@@ -333,212 +297,148 @@ def classificar_postura_box(box):
 
     if proporcao >= LIMIAR_EM_PE:
         return "em_pe", bx1, by1, bx2, by2, proporcao
-
     if proporcao <= LIMIAR_QUEDA_HORZ:
         return "horizontal", bx1, by1, bx2, by2, proporcao
-
     return "transicao", bx1, by1, bx2, by2, proporcao
 
 
-def selecionar_melhor_box(result):
-    if result.boxes is None or len(result.boxes) == 0:
-        return None
-
-    melhor_box = None
-    melhor_pontuacao = -1.0
-
-    for box in result.boxes:
-        xyxy = box.xyxy[0].cpu().numpy()
-        bx1, by1, bx2, by2 = int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])
-        largura = max(1, bx2 - bx1)
-        altura = max(1, by2 - by1)
-        area = largura * altura
-        confianca = float(box.conf[0].cpu().item()) if box.conf is not None else 0.0
-        pontuacao = area * (0.5 + confianca)
-
-        if pontuacao > melhor_pontuacao:
-            melhor_pontuacao = pontuacao
-            melhor_box = box
-
-    return melhor_box
-
-
-def extrair_geometria_box(box):
-    xyxy = box.xyxy[0].cpu().numpy()
-    bx1, by1, bx2, by2 = int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])
-    largura = max(1, bx2 - bx1)
-    altura = max(1, by2 - by1)
-    centro_x = bx1 + largura // 2
-    centro_y = by1 + altura // 2
-    proporcao = altura / largura
-    return bx1, by1, bx2, by2, largura, altura, centro_x, centro_y, proporcao
-
-
-def confirmar_risco_com_openai(frames_base64, contexto_texto):
+def confirmar_risco_com_openai(frames_base64):
     if cliente_openai is None:
-        return None, "OpenAI nao configurada"
+        return None, "OpenAI fora de servico"
 
+    # Prompt reescrito de forma impositiva para evitar respostas negligentes da IA
     prompt = (
-        "Analise a imagem da camera de seguranca. Foque em identificar se o ser humano detectado "
-        "esta deitado no chao, caído, desmaiado ou em uma situacao de vulnerabilidade (como chao de banheiro/sala). "
-        "Responda APENAS em JSON valido com as chaves: "
-        '"risco" (0 a 100), "queda" (boolean), "motivo" (string) e "categoria" (string). '
-        "Se a pessoa estiver deitada no chao ou caída, marque 'queda': true e risco acima de 80. "
-        "Se ela estiver apenas sentada em uma cadeira, em pe ou agachada normalmente trabalhando, marque 'queda': false. "
-        f"Contexto: {contexto_texto}."
+        "IMPORTANTE: Você monitora o chão de um quarto. Se o ser humano estocado na imagem "
+        "estiver deitado diretamente sobre o chão, azulejos ou tapetes, responda como QUEDA e risco alto, "
+        "mesmo que pareça brincando, deitado de bruços, descansando ou posando. Corpo totalmente horizontalizado "
+        "no nível inferior é emergência no chão.\n"
+        "Retorne OBRIGATORIAMENTE um objeto em JSON com as chaves exatas:\n"
+        '{"risco": int(0-100), "queda": bool, "motivo": "string curta", "categoria": "queda"/"risco_alto"/"seguro"}'
     )
 
-    imagens = []
-    for frame_base64 in frames_base64:
-        imagens.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{frame_base64}"},
-            }
-        )
-
-    resposta = cliente_openai.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=0,
-        response_format={"type": "json_object"},
-        messages=[
-            {
-                "role": "system",
-                "content": "Você é um classificador visual de quedas para um sistema de segurança.",
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    *imagens,
-                ],
-            },
-        ],
-    )
-
-    texto = (resposta.choices[0].message.content or "").strip()
-    if texto.startswith("```"):
-        texto = texto.strip("`\n")
+    imagens = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}} for f in frames_base64]
 
     try:
-        dados = json.loads(texto)
-        queda = bool(dados.get("queda", False))
-        risco = int(dados.get("risco", 0))
-        motivo = str(dados.get("motivo", ""))
-        categoria = str(dados.get("categoria", ""))
-        return {"queda": queda, "risco": risco, "motivo": motivo, "categoria": categoria}, None
+        resposta = cliente_openai.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": "Você é um operador de emergência e segurança residencial rígido."},
+                {"role": "user", "content": [{"type": "text", "text": prompt}, *imagens]},
+            ],
+        )
+        return json.loads(resposta.choices[0].message.content), None
     except Exception as erro:
-        return None, f"Falha ao interpretar resposta da OpenAI: {erro}"
+        return None, f"Erro JSON: {str(erro)[:15]}"
 
 
-def desenhar_resultado(frame, result):
+def drawing_engine(frame, result):
     tela = frame.copy()
-    queda_detectada_neste_frame = False
-    contador_pessoas = 0
-    melhor_box = selecionar_melhor_box(result)
-
+    queda_detectada = False
+    
     if result.boxes is None or len(result.boxes) == 0:
-        return tela, queda_detectada_neste_frame, contador_pessoas, None, "sem_pessoa", None
+        return tela, False, 0, None, "sem_pessoa"
 
-    contador_pessoas = len(result.boxes)
+    # Seleção inteligente baseada na maior área em tela
+    melhor_box = None
+    maior_area = -1
+    for box in result.boxes:
+        xyxy = box.xyxy[0].cpu().numpy()
+        area = (xyxy[2] - xyxy[0]) * (xyxy[3] - xyxy[1])
+        if area > maior_area:
+            maior_area = area
+            melhor_box = box
 
-    # Draw only the main (best) box prominently; keep others minimal to reduce drawing cost.
+    contador_p = len(result.boxes)
+    postura_melhor = "indefinida"
+
     for box in result.boxes:
         postura, bx1, by1, bx2, by2, proporcao = classificar_postura_box(box)
-        eh_melhor_box = melhor_box is not None and box is melhor_box
+        eh_principal = (box is melhor_box)
 
-        if not eh_melhor_box:
-            # thin light rectangles for secondary detections
-            cv2.rectangle(tela, (bx1, by1), (bx2, by2), (100, 100, 100), 1)
-            continue
+        if eh_principal:
+            postura_melhor = postura
+            cor = (0, 0, 255) if postura == "horizontal" else (0, 255, 255)
+            espessura = 3
+            
+            if postura == "horizontal":
+                queda_detectada = True
+                cv2.putText(tela, "ALVO NO CHAO", (bx1, max(by1 - 12, 20)), cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 255), 2)
+            else:
+                cv2.putText(tela, f"MONITORANDO ({proporcao:.1f})", (bx1, max(by1 - 12, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cor, 1)
+        else:
+            cor = (120, 120, 120)
+            espessura = 1
 
-        # prominent main box
-        cor_caixa = (0, 255, 255)
-        espessura = 3
-        cv2.rectangle(tela, (bx1, by1), (bx2, by2), cor_caixa, espessura)
-        cv2.putText(
-            tela,
-            f"PESSOA {proporcao:.2f}",
-            (bx1, max(by1 - 10, 20)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            cor_caixa,
-            2,
-        )
+        cv2.rectangle(tela, (bx1, by1), (bx2, by2), cor, espessura)
 
-        if postura == "horizontal":
-            queda_detectada_neste_frame = True
-            cv2.rectangle(tela, (bx1, by1), (bx2, by2), (0, 0, 255), 3)
-            cv2.putText(tela, "SUSPEITA DE QUEDA", (bx1, by1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+    return tela, queda_detectada, contador_p, melhor_box, postura_melhor
 
-    postura_melhor = "indefinida"
-    geometria_melhor = None
-    if melhor_box is not None:
-        postura_melhor, bx1, by1, bx2, by2, proporcao = classificar_postura_box(melhor_box)
-        geometria_melhor = extrair_geometria_box(melhor_box)
-        if postura_melhor == "horizontal":
-            cv2.putText(tela, "ALVO PRINCIPAL: HORIZONTAL", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-    return tela, queda_detectada_neste_frame, contador_pessoas, melhor_box, postura_melhor, geometria_melhor
+# Inicialização das Threads de Processamento Pararelo
+threading.Thread(target=capture_thread_fn, args=(cap,), daemon=True).start()
+threading.Thread(target=inference_thread_fn, daemon=True).start()
 
-# Start capture and inference threads
-cap_thread = threading.Thread(target=capture_thread_fn, args=(cap,), daemon=True)
-cap_thread.start()
-inf_thread = threading.Thread(target=inference_thread_fn, daemon=True)
-inf_thread.start()
+print("Serviço ativo. Renderizando painel...")
 
-print("Threads de captura e inferencia iniciadas. Exibindo frames...")
+FPS_DESEJADO = 30
+tempo_por_frame = 1.0 / FPS_DESEJADO
 
+# LOOP PRINCIPAL: Leitura limpa e renderização imediata do HUD
 while running:
-    # get the latest annotated frame if available
-    with annotated_frame_lock:
-        display = None if annotated_frame is None else annotated_frame.copy()
+    start_loop = time.time()
 
-    if display is None:
-        with latest_frame_lock:
-            display = None if latest_frame is None else latest_frame.copy()
+    # Consome preferencialmente o frame processado pela Inteligência Artificial
+    with frame_lock:
+        if annotated_frame is not None:
+            display_final = annotated_frame
+        else:
+            display_final = latest_frame
 
-    if display is None:
-        display = np.zeros((CAPTURE_HEIGHT, CAPTURE_WIDTH, 3), dtype=np.uint8)
+    if display_final is None:
+        display_final = np.zeros((CAPTURE_HEIGHT, CAPTURE_WIDTH, 3), dtype=np.uint8)
 
-    h, w, _ = display.shape
+    h, w, _ = display_final.shape
+    cor_hud_principal = (0, 0, 255) if alerta_disparado else (0, 255, 170)
 
-    # HUD values
-    contador_pessoas = globals().get('contador_pessoas', 0)
-    cor_hud_principal = (0, 0, 255) if globals().get('alerta_disparado', False) else (0, 255, 170)
-
+    # Construção do Painel Lateral Técnico (HUD)
     hud_width = 320
-    interface = cv2.copyMakeBorder(display, 0, 0, 0, hud_width, cv2.BORDER_CONSTANT, value=(15, 15, 15))
+    interface = cv2.copyMakeBorder(display_final, 0, 0, 0, hud_width, cv2.BORDER_CONSTANT, value=(15, 15, 15))
     start_x = w
 
-    # Cálculo de FPS no display
     current_time = time.time()
     fps = int(1 / (current_time - prev_time)) if (current_time - prev_time) > 0 else 0
     prev_time = current_time
 
+    # Elementos Estéticos e Dados do Painel
     cv2.line(interface, (start_x, 0), (start_x, h), cor_hud_principal, 2)
     cv2.putText(interface, "MONITOR DE SEGURANCA", (start_x + 20, 40), cv2.FONT_HERSHEY_DUPLEX, 0.6, (255, 255, 255), 1)
     cv2.line(interface, (start_x + 20, 55), (start_x + 250, 55), (60, 60, 60), 1)
-    status_texto = "EMERGENCIA / QUEDA" if globals().get('alerta_disparado', False) else "SISTEMA NORMAL"
+    
+    status_texto = "EMERGENCIA / QUEDA" if alerta_disparado else "SISTEMA NORMAL"
     cv2.putText(interface, f"STATUS: {status_texto}", (start_x + 20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.5, cor_hud_principal, 1)
     cv2.putText(interface, f"PESSOAS EM CENA: {contador_pessoas}", (start_x + 20, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     cv2.putText(interface, f"HARDWARE: {DEVICE} ({fps} FPS)", (start_x + 20, 180), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (180, 180, 180), 1)
-    cv2.putText(interface, f"IA: {globals().get('status_ai', '')}", (start_x + 20, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
+    cv2.putText(interface, f"IA: {status_ai}", (start_x + 20, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
-    if globals().get('alerta_disparado', False):
-        cv2.rectangle(interface, (start_x + 15, 230), (start_x + 300, 290), (0, 0, 180), -1)
-        cv2.putText(interface, "ALERTA ENVIADO!", (start_x + 40, 265), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    if alerta_disparado:
+        cv2.rectangle(interface, (start_x + 15, 240), (start_x + 300, 295), (0, 0, 180), -1)
+        cv2.putText(interface, f"ALERTA ENVIADO", (start_x + 45, 275), cv2.FONT_HERSHEY_DUPLEX, 0.55, (255, 255, 255), 1)
 
-    cv2.putText(interface, "Aperte 'Q' para fechar", (start_x + 20, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
-    cv2.imshow("Guardião IA - Visão Computacional", interface)
+    cv2.putText(interface, "Aperte 'Q' para fechar", (start_x + 20, h - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (90, 90, 90), 1)
+    
+    cv2.imshow("Guardiao IA - Visao Computacional", interface)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         running = False
         break
 
-# join threads and cleanup
-cap_thread.join(timeout=1.0)
-inf_thread.join(timeout=1.0)
+    # Controlador de Latência para impedir acúmulo em máquinas limitadas
+    tempo_gasto = time.time() - start_loop
+    tempo_restante = tempo_por_frame - tempo_gasto
+    if tempo_restante > 0:
+        time.sleep(tempo_restante)
 
 cap.release()
 cv2.destroyAllWindows()
