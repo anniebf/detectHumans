@@ -6,10 +6,10 @@
 
 ## Criadores
 
-- **Hianny**
-- **Thalia** 
-- **Igor** 
-- **Claverson** 
+- **Hianny Urt**
+- **Thalia Limeira** 
+- **Igor Alves** 
+- **Cleverson Felipe** 
 
 **Instituição:** Univag  
 **Data:** 2026
