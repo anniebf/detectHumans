@@ -39,9 +39,8 @@ Desenvolver um sistema automático de **detecção de quedas em tempo real** que
 O dataset foi anotado usando **CVAT (Computer Vision Annotation Tool)** com:
 
 - **926 imagens** coletadas e anotadas manualmente
-- **2 classes de segmentação:**
-  - `pessoa_caida`: pessoa deitada ou caída no chão
-  - `pessoa_em_pe`: pessoa em posição normal (em pé)
+- **1 classe de segmentação:**
+  - `pessoa`: localiza qualquer pessoa no quadro
 - **Formato:** Polígonos de segmentação (máscaras) exportadas em formato YOLO
 - **Divisão:** ~80% treino, ~20% validação
 
