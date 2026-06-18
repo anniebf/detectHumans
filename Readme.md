@@ -385,15 +385,6 @@ numpy==1.24.3
 
 ---
 
-## Notas Importantes
-
--  **Privacidade:** Garanta consentimento para captura de vídeo
--  **Segurança:** Nunca compartilhe `OPENAI_API_KEY` em repositórios públicos
--  **Precisão:** Quanto mais dados anotados, melhor o desempenho
--  **Performance:** Use GPU para produção (100+ FPS vs 25 FPS em CPU)
-
----
-
 ##  Licença
 
 Este projeto é desenvolvido para fins de aprendizado como parte de projeto integrador, caso a ideia seja reultilizda para outros meios o projeto original deve ser refenciada.
