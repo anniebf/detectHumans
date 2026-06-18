@@ -112,7 +112,7 @@ def confirmar_risco_com_openai(frames_base64):
   "categoria": "queda"
 }
 ```
-### 4. **Interface Gráfica em Tempo Real**
+### 4. **Envio de alertas por Whatsapp**
 O sistema envia alertas de queda com uma imagem capturada do momento do evento diretamente para um contato configurado no WhatsApp. Isso é feito de forma assíncrona para não impactar o desempenho do monitoramento em tempo real e respeita um período de cooldown para evitar spam.
 
 ```python
