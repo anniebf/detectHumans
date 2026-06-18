@@ -57,9 +57,8 @@ AI_SAMPLE_SECONDS = 0.4
 AI_JANELA_FRAMES = 3
 contador_pessoas = 0
 
-# --- CONFIGURAÇÃO DE COOLDOWN DO WHATSAPP ---
-ultimo_envio_whatsapp = 0.0
-WHATSAPP_COOLDOWN = 10.0  # Tempo em segundos para evitar spam
+# COOLDOWN DO WHATSAPP ---
+WHATSAPP_COOLDOWN = 10.0  # Tempo de espera entre alertas do zap
 
 cliente_openai = None
 if CONFIRMAR_QUEDA_AI:
@@ -77,7 +76,7 @@ def enviar_alerta_whatsapp_safe():
     if agora - ultimo_envio_whatsapp >= WHATSAPP_COOLDOWN:
         ultimo_envio_whatsapp = agora
         
-        # Captura o frame exato do momento do alerta de forma segura
+        # Captura o frame exato do momento do alerta 
         frame_alerta = None
         with frame_lock:
             if latest_frame is not None:
@@ -106,7 +105,7 @@ def executar_requisicao_whatsapp(foto_b64):
         payload = {
             "chatId": "556593323330@c.us",
             "contentType": "string",
-            "content": "🚨 ALERTA: Foi detectada uma possível queda no ambiente monitorado!",
+            "content": "🚨🚨🚨 ALERTA: Foi detectada uma possível queda no ambiente monitorado!",
             "options": {
                 "media": {
                     "mimetype": "image/jpeg",
@@ -119,7 +118,7 @@ def executar_requisicao_whatsapp(foto_b64):
         payload = {
             "chatId": "556593323330@c.us",
             "contentType": "string",
-            "content": "🚨 ALERTA: Queda detectada! (Falha ao capturar imagem da câmera)"
+            "content": "🚨🚨🚨 ALERTA: Queda detectada! (Falha ao capturar imagem da câmera)"
         }
 
     headers = {"Content-Type": "application/json"}

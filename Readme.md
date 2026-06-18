@@ -192,9 +192,10 @@ runs/segment/train3/weights/
 
 ```
 DetectHumans/
-├── alerta.py                    #  Script principal com detecção + GUI
+├── alerta.py                    #  Script sem api whatsapp
+├── alerta_zap.py                #  Script de monitoramento principal S2
 ├── train.py                     #  Script de treinamento YOLO
-├── listar_cameras.py            #  Utilitário para listar câmeras
+├── listar_cameras.py            #  Utilitário para listar câmeras da maquina
 ├── teste_webcam.py              #  Teste de webcam
 ├── requirements.txt             #  Dependências Python
 ├── yolov8n.pt                   #  Modelo pré-treinado
@@ -250,7 +251,7 @@ O treinamento levará entre 1 a 2 dias para treinar e salvará os pesos em `runs
 ### 3. Executar o Sistema de Detecção
 
 ```bash
-python alerta.py
+python alerta_zap.py
 ```
 
 **Ao iniciar:**
@@ -267,7 +268,7 @@ python alerta.py
 
 ## 🔧 Configurações Importantes
 
-Arquivo `alerta.py` - Constantes ajustáveis:
+Arquivo `alerta_zap.py` - Constantes ajustáveis:
 
 ```python
 # Qualidade da câmera
