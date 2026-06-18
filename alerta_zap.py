@@ -70,33 +70,67 @@ if CONFIRMAR_QUEDA_AI:
 
 
 def enviar_alerta_whatsapp_safe():
-    """Envia o alerta para a API local respeitando o cooldown de 10 segundos"""
+    """Envia o alerta com imagem respeitando o cooldown de 10 segundos"""
     global ultimo_envio_whatsapp
     agora = time.time()
     
     if agora - ultimo_envio_whatsapp >= WHATSAPP_COOLDOWN:
         ultimo_envio_whatsapp = agora
-        # Criamos uma thread rápida para a requisição HTTP não congelar o processamento de imagem
-        threading.Thread(target=executar_requisicao_whatsapp, daemon=True).start()
+        
+        # Captura o frame exato do momento do alerta de forma segura
+        frame_alerta = None
+        with frame_lock:
+            if latest_frame is not None:
+                frame_alerta = latest_frame.copy()
+        
+        # Converte o frame para Base64
+        foto_b64 = None
+        if frame_alerta is not None:
+            sucesso, buffer = cv2.imencode(".jpg", frame_alerta, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            if sucesso:
+                foto_b64 = base64.b64encode(buffer).decode("utf-8")
+
+        # Dispara a requisição em segundo plano para não travar a câmera
+        threading.Thread(
+            target=executar_requisicao_whatsapp, 
+            args=(foto_b64,), 
+            daemon=True
+        ).start()
 
 
-def executar_requisicao_whatsapp():
+def executar_requisicao_whatsapp(foto_b64):
     url = "http://localhost:3000/client/sendMessage/ABCD"
-    payload = {
-        "chatId": "556593323330@c.us",
-        "contentType": "string",
-        "content": "🚨 ALERTA: Foi detectada uma possível queda no ambiente monitorado!"
-    }
+    
+    # Se conseguimos gerar o Base64 da foto, usamos a estrutura de media do controller
+    if foto_b64:
+        payload = {
+            "chatId": "556593323330@c.us",
+            "contentType": "string",
+            "content": "🚨 ALERTA: Foi detectada uma possível queda no ambiente monitorado!",
+            "options": {
+                "media": {
+                    "mimetype": "image/jpeg",
+                    "data": foto_b64
+                }
+            }
+        }
+    else:
+        # Fallback caso a conversão da imagem falhe por algum motivo
+        payload = {
+            "chatId": "556593323330@c.us",
+            "contentType": "string",
+            "content": "🚨 ALERTA: Queda detectada! (Falha ao capturar imagem da câmera)"
+        }
+
     headers = {"Content-Type": "application/json"}
     try:
-        response = requests.post(url, data=json.dumps(payload), headers=headers, timeout=5)
+        response = requests.post(url, data=json.dumps(payload), headers=headers, timeout=10)
         if response.status_code == 200:
-            print("[WhatsApp] Alerta disparado com sucesso.")
+            print("[WhatsApp] Alerta com foto disparado com sucesso.")
         else:
             print(f"[WhatsApp] Erro ao enviar mensagem ({response.status_code}): {response.text}")
     except Exception as e:
         print(f"[WhatsApp] Falha de conexão com a API: {e}")
-
 
 def configuring_capture(cap):
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
