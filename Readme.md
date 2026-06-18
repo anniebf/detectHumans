@@ -20,10 +20,10 @@
 
 Desenvolver um sistema automático de **detecção de quedas em tempo real** que:
 
-✅ Detecta pessoas caídas ou deitadas no chão usando segmentação YOLO v8  
-✅ Valida detecções com análise de IA (OpenAI GPT-4)  
-✅ Fornece interface gráfica interativa para monitoramento  
-✅ Gera alertas imediatos de emergência  
+✅ Detecta pessoas caídas ou deitadas no chão usando segmentação YOLO v8
+✅ Valida detecções com análise de IA (OpenAI GPT-4)
+✅ Fornece interface gráfica interativa para monitoramento
+✅ Gera alertas imediatos de emergência via WhatsApp
 ✅ Funciona com webcam em tempo real (30+ FPS)
 
 **Aplicações práticas:**
@@ -112,8 +112,32 @@ def confirmar_risco_com_openai(frames_base64):
   "categoria": "queda"
 }
 ```
-
 ### 4. **Interface Gráfica em Tempo Real**
+O sistema envia alertas de queda com uma imagem capturada do momento do evento diretamente para um contato configurado no WhatsApp. Isso é feito de forma assíncrona para não impactar o desempenho do monitoramento em tempo real e respeita um período de cooldown para evitar spam.
+
+```python
+def enviar_alerta_whatsapp_safe():
+    # ... (lógica de cooldown e captura de frame)
+    threading.Thread(
+        target=executar_requisicao_whatsapp, 
+        args=(foto_b64,), 
+        daemon=True
+    ).start()
+
+def executar_requisicao_whatsapp(foto_b64):
+    url = "http://localhost:3000/client/sendMessage/ABCD" # Endpoint da API do WhatsApp
+    # ... (construção do payload com ou sem imagem em base64 )
+    response = requests.post(url, data=json.dumps(payload), headers=headers, timeout=10)
+```
+
+Detalhes da Integração:
+- **Endpoint da API:** http://localhost:3000/client/sendMessage/ABCD (onde ABCD é o ID da instância ou token da API do WhatsApp ).
+- **Chat ID:** O alerta é enviado para o chatId configurado no payload (ex: 556593323330@c.us).
+- **Conteúdo:** Inclui uma mensagem de texto e, se disponível, uma imagem do momento da queda codificada em Base64.
+- **Cooldown:** Um WHATSAPP_COOLDOWN de 10 segundos é aplicado para evitar múltiplos alertas em um curto período.
+
+
+### 5. **Interface Gráfica em Tempo Real**
 Interface moderna com **CustomTkinter** mostrando:
 
 -  Vídeo ao vivo com anotações
@@ -372,6 +396,7 @@ pillow==10.0.0
 openai==1.3.0
 python-dotenv==1.0.0
 numpy==1.24.3
+requests==2.31.0
 ```
 
 ---
