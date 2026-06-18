@@ -59,6 +59,7 @@ contador_pessoas = 0
 
 # COOLDOWN DO WHATSAPP ---
 WHATSAPP_COOLDOWN = 10.0  # Tempo de espera entre alertas do zap
+ultimo_envio_whatsapp = 0.0
 
 cliente_openai = None
 if CONFIRMAR_QUEDA_AI:
