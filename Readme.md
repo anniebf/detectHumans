@@ -215,7 +215,7 @@ DetectHumans/
 │   └── segment/
 │       └── train3/
 │           └── weights/
-│               ├── best.pt     # ⭐ Modelo final usado
+│               ├── best.pt     # Modelo final usado
 │               └── last.pt
 └── alertas_queda/              #  Alertas salvos automaticamente
 ```
