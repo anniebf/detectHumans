@@ -3,3 +3,6 @@
 __pycache__/
 alertas_queda/
 *.pyc
+# Modelos baixados pela detecção por pose
+modelos/
+.pytest_cache/
